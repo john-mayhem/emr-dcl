@@ -1,13 +1,11 @@
 import os
 import sys
 import time
-import subprocess
-import importlib.util
-import shutil
 import urllib.request
 import json
-import zipfile
-import tempfile
+import shutil
+import logging
+from datetime import datetime
 
 # Check if colorama is available for nice output
 try:
@@ -35,107 +33,148 @@ except ImportError:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CORE_DIR = os.path.join(SCRIPT_DIR, "core")
 
+# Create core directory if it doesn't exist
+if not os.path.exists(CORE_DIR):
+    os.makedirs(CORE_DIR)
+
+# Custom logging formatter with colors - matching the style in other modules
+class ColoredFormatter(logging.Formatter):
+    COLORS = {
+        'DEBUG': Fore.CYAN,
+        'INFO': Fore.GREEN,
+        'WARNING': Fore.YELLOW,
+        'ERROR': Fore.RED,
+        'CRITICAL': Fore.RED + Back.WHITE
+    }
+    
+    def format(self, record):
+        # Add timestamp with color
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        log_color = self.COLORS.get(record.levelname, Fore.WHITE)
+        
+        # Format the message with colors
+        if record.levelname == 'INFO':
+            # For INFO messages, we'll add some variety
+            if "Checking" in record.msg:
+                prefix = f"{Fore.MAGENTA}[{timestamp}] {Fore.BLUE}🔍 "
+            elif "Downloaded" in record.msg or "Saved" in record.msg:
+                prefix = f"{Fore.MAGENTA}[{timestamp}] {Fore.GREEN}📥 "
+            elif "Backed up" in record.msg:
+                prefix = f"{Fore.MAGENTA}[{timestamp}] {Fore.CYAN}📦 "
+            elif "Restored" in record.msg:
+                prefix = f"{Fore.MAGENTA}[{timestamp}] {Fore.GREEN}📤 "
+            elif "Created" in record.msg:
+                prefix = f"{Fore.MAGENTA}[{timestamp}] {Fore.GREEN}✓ "
+            elif "Version" in record.msg:
+                prefix = f"{Fore.MAGENTA}[{timestamp}] {Fore.YELLOW}🏷️ "
+            else:
+                prefix = f"{Fore.MAGENTA}[{timestamp}] {log_color}ℹ️ "
+        elif record.levelname == 'WARNING':
+            prefix = f"{Fore.MAGENTA}[{timestamp}] {log_color}⚠️ "
+        elif record.levelname == 'ERROR':
+            prefix = f"{Fore.MAGENTA}[{timestamp}] {log_color}❌ "
+        elif record.levelname == 'CRITICAL':
+            prefix = f"{Fore.MAGENTA}[{timestamp}] {log_color}🔥 "
+        else:
+            prefix = f"{Fore.MAGENTA}[{timestamp}] {log_color}"
+        
+        return f"{prefix}{record.msg}"
+
+# Configure logging with pretty colors and file output
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(ColoredFormatter())
+
+file_handler = logging.FileHandler(os.path.join(CORE_DIR, "updater.log"))
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logger = logging.getLogger("Updater")
+logger.setLevel(logging.INFO)
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
 # Version information
-CURRENT_VERSION = "1.0.0"  # Update this when you release a new version
-GITHUB_REPO = "https://api.github.com/repos/YOUR_USERNAME/YOUR_REPO"  # Replace with your repo details
-GITHUB_RELEASE_URL = f"{GITHUB_REPO}/releases/latest"
-GITHUB_ZIPBALL_URL = f"{GITHUB_REPO}/zipball/main"  # Or master, depending on your branch name
+CURRENT_VERSION = "1.0.1"  # Update this when you release a new version
+REPO_USER = "john-mayhem"
+REPO_NAME = "emr-dcl"
+REPO_BRANCH = "main"
+
+# File list to check and update
+FILES_TO_UPDATE = [
+    {"path": "core/comparator.py", "local": os.path.join(CORE_DIR, "comparator.py")},
+    {"path": "core/data_processor.py", "local": os.path.join(CORE_DIR, "data_processor.py")},
+    {"path": "core/emr_data_collector.py", "local": os.path.join(CORE_DIR, "emr_data_collector.py")},
+    {"path": "core/google_sheets_collector.py", "local": os.path.join(CORE_DIR, "google_sheets_collector.py")},
+    {"path": "core/kml_generator.py", "local": os.path.join(CORE_DIR, "kml_generator.py")},
+    {"path": "MapScript.bat", "local": os.path.join(SCRIPT_DIR, "MapScript.bat")},
+    {"path": "main-launcher.py", "local": os.path.join(SCRIPT_DIR, "main-launcher.py")},
+    {"path": "updater.py", "local": os.path.join(SCRIPT_DIR, "updater.py")}
+]
+
+def get_raw_file_url(file_path):
+    """Get the raw URL for a file in the GitHub repository"""
+    return f"https://raw.githubusercontent.com/{REPO_USER}/{REPO_NAME}/{REPO_BRANCH}/{file_path}"
+
+def get_remote_version():
+    """Get the version from the remote updater.py file"""
+    try:
+        logger.info(f"Checking remote version from {REPO_USER}/{REPO_NAME}")
+        updater_url = get_raw_file_url("updater.py")
+        logger.info(f"Fetching remote updater.py from: {updater_url}")
+        
+        req = urllib.request.Request(
+            updater_url,
+            headers={
+                'User-Agent': 'EMR-Data-Mapper-Updater'
+            }
+        )
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            logger.info(f"Got response from GitHub (status: {response.status})")
+            content = response.read().decode('utf-8')
+            logger.debug(f"Received content length: {len(content)} bytes")
+            
+            # Find the CURRENT_VERSION line
+            for line in content.splitlines():
+                if 'CURRENT_VERSION' in line and '=' in line:
+                    # Extract the version string more carefully
+                    version_part = line.split('=')[1].strip()
+                    # Extract just the version number (remove comments and quotes)
+                    import re
+                    version_match = re.match(r'["\']([0-9.]+)["\']', version_part)
+                    if version_match:
+                        version_str = version_match.group(1)
+                        logger.info(f"Found remote version: {version_str}")
+                        return version_str
+            
+            logger.warning("Could not find CURRENT_VERSION in remote updater.py")
+            return None
+    except Exception as e:
+        logger.error(f"Error checking remote version: {e}")
+        return None
 
 def check_for_updates():
     """Check if a newer version is available"""
-    print(f"{Fore.CYAN}Checking for updates...")
+    logger.info("Starting update check")
     
     try:
-        # Setup request with appropriate headers
-        req = urllib.request.Request(
-            GITHUB_RELEASE_URL,
-            headers={
-                'User-Agent': 'EMR-Data-Mapper-Updater'
-            }
-        )
+        logger.info(f"Current version: {CURRENT_VERSION}")
+        remote_version = get_remote_version()
         
-        # Get the latest release info
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode('utf-8'))
-            latest_version = data.get('tag_name', '').replace('v', '')
-            
-            if not latest_version:
-                print(f"{Fore.YELLOW}Could not determine latest version.")
-                return False
-            
-            print(f"{Fore.GREEN}Current version: {CURRENT_VERSION}")
-            print(f"{Fore.GREEN}Latest version: {latest_version}")
-            
-            # Compare versions (simple string comparison for now, could be improved)
-            if latest_version > CURRENT_VERSION:
-                print(f"{Fore.YELLOW}Update available: v{latest_version}")
-                return latest_version
-            else:
-                print(f"{Fore.GREEN}You have the latest version.")
-                return False
-    except Exception as e:
-        print(f"{Fore.RED}Error checking for updates: {e}")
-        return False
-
-def download_update(version):
-    """Download and install the latest update"""
-    print(f"{Fore.CYAN}Downloading update v{version}...")
-    
-    try:
-        # Create a backup of current files
-        backup_dir = create_backup()
-        if not backup_dir:
-            print(f"{Fore.RED}Failed to create backup. Update aborted.")
+        if not remote_version:
+            logger.warning("Could not determine remote version")
             return False
         
-        # Setup request with appropriate headers
-        req = urllib.request.Request(
-            GITHUB_ZIPBALL_URL,
-            headers={
-                'User-Agent': 'EMR-Data-Mapper-Updater'
-            }
-        )
+        logger.info(f"Remote version: {remote_version}")
         
-        # Download the zipball
-        with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as temp_file:
-            temp_zip_path = temp_file.name
-            
-            with urllib.request.urlopen(req, timeout=30) as response:
-                # Download with progress reporting
-                file_size = int(response.headers.get('Content-Length', 0))
-                downloaded = 0
-                chunk_size = 8192
-                
-                print(f"{Fore.CYAN}Downloading {file_size/1024/1024:.2f} MB...")
-                
-                while True:
-                    chunk = response.read(chunk_size)
-                    if not chunk:
-                        break
-                    
-                    temp_file.write(chunk)
-                    downloaded += len(chunk)
-                    
-                    # Print progress
-                    if file_size > 0:
-                        percent = downloaded * 100 / file_size
-                        sys.stdout.write(f"\r{Fore.CYAN}Progress: {percent:.1f}%")
-                        sys.stdout.flush()
-            
-            print(f"\n{Fore.GREEN}Download complete.")
-        
-        # Extract and install the update
-        if install_update(temp_zip_path, backup_dir):
-            os.unlink(temp_zip_path)  # Remove the temporary zip file
-            return True
+        # Compare versions (simple string comparison for now)
+        if remote_version > CURRENT_VERSION:
+            logger.info(f"Update available: v{remote_version}")
+            return remote_version
         else:
-            print(f"{Fore.RED}Update installation failed. Restoring from backup...")
-            restore_from_backup(backup_dir)
-            os.unlink(temp_zip_path)
+            logger.info("You have the latest version")
             return False
-            
     except Exception as e:
-        print(f"{Fore.RED}Error downloading update: {e}")
+        logger.error(f"Error checking for updates: {e}")
         return False
 
 def create_backup():
@@ -144,105 +183,144 @@ def create_backup():
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         backup_dir = os.path.join(SCRIPT_DIR, f"backup-{timestamp}")
         
+        logger.info(f"Creating backup directory: {backup_dir}")
         if not os.path.exists(backup_dir):
             os.makedirs(backup_dir)
         
-        print(f"{Fore.CYAN}Creating backup in {backup_dir}")
+        # Create core directory in backup if needed
+        backup_core_dir = os.path.join(backup_dir, "core")
+        if not os.path.exists(backup_core_dir):
+            os.makedirs(backup_core_dir)
+            logger.info(f"Created core directory in backup: {backup_core_dir}")
         
-        # Copy core directory
-        if os.path.exists(CORE_DIR):
-            core_backup = os.path.join(backup_dir, "core")
-            shutil.copytree(CORE_DIR, core_backup)
+        # Copy each file to backup
+        backup_count = 0
+        for file_info in FILES_TO_UPDATE:
+            local_path = file_info["local"]
+            if os.path.exists(local_path):
+                # Determine the backup path
+                if "core/" in file_info["path"]:
+                    backup_path = os.path.join(backup_core_dir, os.path.basename(local_path))
+                else:
+                    backup_path = os.path.join(backup_dir, os.path.basename(local_path))
+                
+                # Copy the file
+                shutil.copy2(local_path, backup_path)
+                logger.info(f"Backed up: {os.path.basename(local_path)}")
+                backup_count += 1
         
-        # Copy main script files
-        for file in os.listdir(SCRIPT_DIR):
-            if file.endswith('.py') or file.endswith('.bat'):
-                source = os.path.join(SCRIPT_DIR, file)
-                target = os.path.join(backup_dir, file)
-                shutil.copy2(source, target)
-        
-        print(f"{Fore.GREEN}Backup created successfully.")
+        logger.info(f"Backup completed: {backup_count} files backed up")
         return backup_dir
     except Exception as e:
-        print(f"{Fore.RED}Error creating backup: {e}")
+        logger.error(f"Error creating backup: {e}")
         return None
 
-def find_root_dir_in_zip(zip_ref):
-    """Find the root directory in the GitHub zipball"""
-    for name in zip_ref.namelist():
-        if name.endswith('/'):
-            parts = name.split('/')
-            if len(parts) == 2:  # First level directory
-                return parts[0]
-    return None
-
-def install_update(zip_path, backup_dir):
-    """Extract and install files from the update zip"""
+def download_file(file_path, local_path):
+    """Download a single file from the GitHub repository"""
     try:
-        print(f"{Fore.CYAN}Installing update...")
+        file_url = get_raw_file_url(file_path)
+        logger.info(f"Downloading {file_path} from {file_url}")
         
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            # GitHub zipballs have a root directory with the repo name and commit hash
-            # We need to extract from that directory
-            root_dir = find_root_dir_in_zip(zip_ref)
+        req = urllib.request.Request(
+            file_url,
+            headers={
+                'User-Agent': 'EMR-Data-Mapper-Updater'
+            }
+        )
+        
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        
+        # Download the file
+        with urllib.request.urlopen(req, timeout=10) as response:
+            logger.info(f"Received response (status: {response.status})")
+            content = response.read()
+            logger.info(f"Downloaded {len(content)} bytes")
             
-            if not root_dir:
-                print(f"{Fore.RED}Could not find root directory in zip file.")
-                return False
+            with open(local_path, 'wb') as f:
+                f.write(content)
             
-            # Extract to a temporary directory
-            temp_extract_dir = tempfile.mkdtemp()
-            zip_ref.extractall(temp_extract_dir)
-            
-            # Copy files from the extracted temp directory to the installation directory
-            extracted_root = os.path.join(temp_extract_dir, root_dir)
-            
-            # Copy/update core directory
-            extracted_core = os.path.join(extracted_root, "core")
-            if os.path.exists(extracted_core):
-                if os.path.exists(CORE_DIR):
-                    shutil.rmtree(CORE_DIR)
-                shutil.copytree(extracted_core, CORE_DIR)
-            
-            # Copy/update main script files
-            for file in os.listdir(extracted_root):
-                if file.endswith('.py') or file.endswith('.bat'):
-                    source = os.path.join(extracted_root, file)
-                    target = os.path.join(SCRIPT_DIR, file)
-                    shutil.copy2(source, target)
-            
-            # Clean up temporary directory
-            shutil.rmtree(temp_extract_dir)
-            
-            print(f"{Fore.GREEN}Update installed successfully.")
+            logger.info(f"Saved to {local_path}")
             return True
     except Exception as e:
-        print(f"{Fore.RED}Error installing update: {e}")
+        logger.error(f"Error downloading {file_path}: {e}")
+        return False
+
+def download_update(version):
+    """Download and install the latest update"""
+    logger.info(f"Starting update to version {version}")
+    
+    try:
+        # Create a backup of current files
+        logger.info("Creating backup before update")
+        backup_dir = create_backup()
+        if not backup_dir:
+            logger.error("Failed to create backup. Update aborted.")
+            return False
+        
+        # Download each file
+        success_count = 0
+        total_files = len(FILES_TO_UPDATE)
+        
+        for i, file_info in enumerate(FILES_TO_UPDATE):
+            file_path = file_info["path"]
+            local_path = file_info["local"]
+            
+            logger.info(f"[{i+1}/{total_files}] Updating {file_path}")
+            
+            if download_file(file_path, local_path):
+                success_count += 1
+                logger.info(f"Successfully updated {file_path}")
+            else:
+                logger.error(f"Failed to update {file_path}")
+        
+        if success_count == total_files:
+            logger.info(f"Update completed successfully: {success_count}/{total_files} files updated")
+            return True
+        else:
+            logger.warning(f"Partial update: {success_count}/{total_files} files updated")
+            
+            if success_count < total_files / 2:
+                logger.warning("Less than half of files updated. Restoring from backup...")
+                restore_from_backup(backup_dir)
+                return False
+            
+            return True
+            
+    except Exception as e:
+        logger.error(f"Error during update: {e}")
         return False
 
 def restore_from_backup(backup_dir):
     """Restore files from backup after failed update"""
     try:
-        print(f"{Fore.CYAN}Restoring from backup...")
+        logger.info(f"Restoring from backup: {backup_dir}")
         
-        # Restore core directory
-        backup_core = os.path.join(backup_dir, "core")
-        if os.path.exists(backup_core):
-            if os.path.exists(CORE_DIR):
-                shutil.rmtree(CORE_DIR)
-            shutil.copytree(backup_core, CORE_DIR)
+        # Copy each file from backup
+        restored_count = 0
         
-        # Restore main script files
-        for file in os.listdir(backup_dir):
-            if file.endswith('.py') or file.endswith('.bat'):
-                source = os.path.join(backup_dir, file)
-                target = os.path.join(SCRIPT_DIR, file)
-                shutil.copy2(source, target)
+        for file_info in FILES_TO_UPDATE:
+            local_path = file_info["local"]
+            
+            # Determine the backup path
+            if "core/" in file_info["path"]:
+                backup_path = os.path.join(backup_dir, "core", os.path.basename(local_path))
+            else:
+                backup_path = os.path.join(backup_dir, os.path.basename(local_path))
+            
+            if os.path.exists(backup_path):
+                # Ensure the target directory exists
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                
+                # Copy the file back
+                shutil.copy2(backup_path, local_path)
+                restored_count += 1
+                logger.info(f"Restored: {os.path.basename(local_path)}")
         
-        print(f"{Fore.GREEN}Restoration completed successfully.")
+        logger.info(f"Restoration complete: {restored_count} files restored")
         return True
     except Exception as e:
-        print(f"{Fore.RED}Error restoring from backup: {e}")
+        logger.error(f"Error restoring from backup: {e}")
         return False
 
 def run_updater():
@@ -251,18 +329,27 @@ def run_updater():
     print(f"{Fore.YELLOW}{Style.BRIGHT}{'EMR DATA MAPPER UPDATER':^80}")
     print(f"{Fore.CYAN}{Style.BRIGHT}{'='*80}{Style.RESET_ALL}\n")
     
+    logger.info("Starting updater")
+    
     # Check for updates
     update_version = check_for_updates()
     if update_version:
+        logger.info(f"Update available: {update_version}")
         do_update = input(f"{Fore.YELLOW}Would you like to update to version {update_version}? (y/n): ")
+        logger.info(f"User response to update prompt: {do_update}")
+        
         if do_update.lower() == 'y':
             if download_update(update_version):
-                print(f"{Fore.GREEN}Update complete! The program will now restart.")
-                return True
+                logger.info("Update completed successfully. Application will restart.")
+                # Return exit code 1 to signal update was performed
+                sys.exit(1)
             else:
-                print(f"{Fore.RED}Update failed. Continuing with current version.")
+                logger.warning("Update failed. Continuing with current version.")
+    else:
+        logger.info("No updates available")
     
-    return False
+    # Return exit code 0 to signal no update needed
+    sys.exit(0)
 
 if __name__ == "__main__":
     run_updater()
