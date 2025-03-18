@@ -264,21 +264,13 @@ def check_for_updates():
     print(f"{Fore.CYAN}{'─'*80}{Style.RESET_ALL}")
     
     try:
-        result = subprocess.run(
-            [sys.executable, updater_path],
-            capture_output=True,
-            text=True
-        )
+        # Run the updater with direct subprocess call instead of capturing output
+        # This allows the updater to handle its own input/output correctly
+        result = subprocess.call([sys.executable, updater_path])
         
-        # Print the output from the updater
-        if result.stdout:
-            print(result.stdout)
-        if result.stderr:
-            print(f"{Fore.RED}{result.stderr}")
-        
-        # If the updater returns 0, no update was performed or needed
-        # If it returns anything else, an update was performed and we should restart
-        return result.returncode != 0
+        # If updater returns 0, no update needed or user declined
+        # If it returns 1, an update was performed and we should restart
+        return result == 1
     except Exception as e:
         print(f"{Fore.RED}Error checking for updates: {e}")
         return False
