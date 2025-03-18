@@ -93,7 +93,7 @@ logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
 # Version information
-CURRENT_VERSION = "1.0.2"  # Update this when you release a new version
+CURRENT_VERSION = "1.0.1"  # Update this when you release a new version
 REPO_USER = "john-mayhem"
 REPO_NAME = "emr-dcl"
 REPO_BRANCH = "main"
@@ -111,34 +111,42 @@ FILES_TO_UPDATE = [
 ]
 
 def get_raw_file_url(file_path):
-    """Get the raw URL for a file in the GitHub repository with cache busting"""
-    # Add cache-busting timestamp parameter to prevent caching
-    timestamp = int(time.time())
-    return f"https://raw.githubusercontent.com/{REPO_USER}/{REPO_NAME}/{REPO_BRANCH}/{file_path}?t={timestamp}"
+    """Get the raw URL for a file in the GitHub repository with aggressive cache busting"""
+    # Add random number to completely prevent caching
+    random_param = str(time.time()) + str(os.urandom(4).hex())
+    return f"https://raw.githubusercontent.com/{REPO_USER}/{REPO_NAME}/{REPO_BRANCH}/{file_path}?nocache={random_param}"
 
 def get_remote_version():
-    """Get the version from the remote version.txt file"""
+    """Get the version from the remote version.txt file with aggressive cache prevention"""
     try:
         logger.info(f"Checking remote version from {REPO_USER}/{REPO_NAME}")
         version_url = get_raw_file_url("version.txt")
         logger.info(f"Fetching version from: {version_url}")
         
+        # Create a completely fresh request with aggressive cache prevention
         req = urllib.request.Request(
             version_url,
             headers={
-                'User-Agent': 'EMR-Data-Mapper-Updater',
-                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'User-Agent': f'EMR-Data-Mapper-Updater-{os.urandom(4).hex()}',
+                'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
                 'Pragma': 'no-cache',
-                'Expires': '0'
+                'Expires': '-1'
             }
         )
+        
+        # Create a custom opener that ignores caches
+        opener = urllib.request.build_opener(urllib.request.HTTPHandler())
+        urllib.request.install_opener(opener)
         
         with urllib.request.urlopen(req, timeout=10) as response:
             logger.info(f"Got response from GitHub (status: {response.status})")
             content = response.read().decode('utf-8').strip()
             
+            # Clear any connection pool that might be caching
+            opener.close()
+            
             # Log the content
-            logger.info(f"Version file content: {content}")
+            logger.info(f"Version file content: '{content}'")
             
             # Simple validation check
             import re
@@ -146,7 +154,7 @@ def get_remote_version():
                 logger.info(f"Found remote version: {content}")
                 return content
             else:
-                logger.warning(f"Invalid version format: {content}")
+                logger.warning(f"Invalid version format: '{content}'")
                 return None
             
     except Exception as e:
@@ -180,46 +188,8 @@ def check_for_updates():
         logger.error(f"Error checking for updates: {e}")
         return False
 
-def create_backup():
-    """Create a backup of the current installation"""
-    try:
-        timestamp = time.strftime("%Y%m%d-%H%M%S")
-        backup_dir = os.path.join(SCRIPT_DIR, f"backup-{timestamp}")
-        
-        logger.info(f"Creating backup directory: {backup_dir}")
-        if not os.path.exists(backup_dir):
-            os.makedirs(backup_dir)
-        
-        # Create core directory in backup if needed
-        backup_core_dir = os.path.join(backup_dir, "core")
-        if not os.path.exists(backup_core_dir):
-            os.makedirs(backup_core_dir)
-            logger.info(f"Created core directory in backup: {backup_core_dir}")
-        
-        # Copy each file to backup
-        backup_count = 0
-        for file_info in FILES_TO_UPDATE:
-            local_path = file_info["local"]
-            if os.path.exists(local_path):
-                # Determine the backup path
-                if "core/" in file_info["path"]:
-                    backup_path = os.path.join(backup_core_dir, os.path.basename(local_path))
-                else:
-                    backup_path = os.path.join(backup_dir, os.path.basename(local_path))
-                
-                # Copy the file
-                shutil.copy2(local_path, backup_path)
-                logger.info(f"Backed up: {os.path.basename(local_path)}")
-                backup_count += 1
-        
-        logger.info(f"Backup completed: {backup_count} files backed up")
-        return backup_dir
-    except Exception as e:
-        logger.error(f"Error creating backup: {e}")
-        return None
-
 def download_file(file_path, local_path):
-    """Download a single file from the GitHub repository"""
+    """Download a single file from the GitHub repository with cache prevention"""
     try:
         file_url = get_raw_file_url(file_path)
         logger.info(f"Downloading {file_path} from {file_url}")
@@ -227,9 +197,16 @@ def download_file(file_path, local_path):
         req = urllib.request.Request(
             file_url,
             headers={
-                'User-Agent': 'EMR-Data-Mapper-Updater'
+                'User-Agent': f'EMR-Data-Mapper-Downloader-{os.urandom(4).hex()}',
+                'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+                'Pragma': 'no-cache',
+                'Expires': '-1'
             }
         )
+        
+        # Create a custom opener that ignores caches
+        opener = urllib.request.build_opener(urllib.request.HTTPHandler())
+        urllib.request.install_opener(opener)
         
         # Ensure the directory exists
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
@@ -250,17 +227,10 @@ def download_file(file_path, local_path):
         return False
 
 def download_update(version):
-    """Download and install the latest update"""
+    """Download and install the latest update without creating backups"""
     logger.info(f"Starting update to version {version}")
     
     try:
-        # Create a backup of current files
-        logger.info("Creating backup before update")
-        backup_dir = create_backup()
-        if not backup_dir:
-            logger.error("Failed to create backup. Update aborted.")
-            return False
-        
         # Download each file
         success_count = 0
         total_files = len(FILES_TO_UPDATE)
@@ -277,57 +247,20 @@ def download_update(version):
             else:
                 logger.error(f"Failed to update {file_path}")
         
-        if success_count == total_files:
-            logger.info(f"Update completed successfully: {success_count}/{total_files} files updated")
+        if success_count > 0:
+            logger.info(f"Update completed: {success_count}/{total_files} files updated")
             return True
         else:
-            logger.warning(f"Partial update: {success_count}/{total_files} files updated")
-            
-            if success_count < total_files / 2:
-                logger.warning("Less than half of files updated. Restoring from backup...")
-                restore_from_backup(backup_dir)
-                return False
-            
-            return True
+            logger.warning(f"Update failed: No files were updated")
+            return False
             
     except Exception as e:
         logger.error(f"Error during update: {e}")
         return False
 
-def restore_from_backup(backup_dir):
-    """Restore files from backup after failed update"""
-    try:
-        logger.info(f"Restoring from backup: {backup_dir}")
-        
-        # Copy each file from backup
-        restored_count = 0
-        
-        for file_info in FILES_TO_UPDATE:
-            local_path = file_info["local"]
-            
-            # Determine the backup path
-            if "core/" in file_info["path"]:
-                backup_path = os.path.join(backup_dir, "core", os.path.basename(local_path))
-            else:
-                backup_path = os.path.join(backup_dir, os.path.basename(local_path))
-            
-            if os.path.exists(backup_path):
-                # Ensure the target directory exists
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                
-                # Copy the file back
-                shutil.copy2(backup_path, local_path)
-                restored_count += 1
-                logger.info(f"Restored: {os.path.basename(local_path)}")
-        
-        logger.info(f"Restoration complete: {restored_count} files restored")
-        return True
-    except Exception as e:
-        logger.error(f"Error restoring from backup: {e}")
-        return False
 
 def run_updater():
-    """Main function to run the updater"""
+    """Main function to run the updater without user interaction"""
     print(f"\n{Fore.CYAN}{Style.BRIGHT}{'='*80}")
     print(f"{Fore.YELLOW}{Style.BRIGHT}{'EMR DATA MAPPER UPDATER':^80}")
     print(f"{Fore.CYAN}{Style.BRIGHT}{'='*80}{Style.RESET_ALL}\n")
@@ -338,16 +271,16 @@ def run_updater():
     update_version = check_for_updates()
     if update_version:
         logger.info(f"Update available: {update_version}")
-        do_update = input(f"{Fore.YELLOW}Would you like to update to version {update_version}? (y/n): ")
-        logger.info(f"User response to update prompt: {do_update}")
+        print(f"{Fore.GREEN}Update available! Automatically updating from v{CURRENT_VERSION} to v{update_version}...")
         
-        if do_update.lower() == 'y':
-            if download_update(update_version):
-                logger.info("Update completed successfully. Application will restart.")
-                # Return exit code 1 to signal update was performed
-                sys.exit(1)
-            else:
-                logger.warning("Update failed. Continuing with current version.")
+        if download_update(update_version):
+            logger.info("Update completed successfully. Application will restart.")
+            print(f"{Fore.GREEN}Update completed successfully! The application will now restart.")
+            # Return exit code 1 to signal update was performed
+            sys.exit(1)
+        else:
+            logger.warning("Update failed.")
+            print(f"{Fore.RED}Update failed. Continuing with current version.")
     else:
         logger.info("No updates available")
     
