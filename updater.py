@@ -93,7 +93,7 @@ logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 
 # Version information
-CURRENT_VERSION = "1.0.1"  # Update this when you release a new version
+CURRENT_VERSION = "1.0.2"  # Update this when you release a new version
 REPO_USER = "john-mayhem"
 REPO_NAME = "emr-dcl"
 REPO_BRANCH = "main"
