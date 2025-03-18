@@ -111,45 +111,48 @@ FILES_TO_UPDATE = [
 ]
 
 def get_raw_file_url(file_path):
-    """Get the raw URL for a file in the GitHub repository"""
-    return f"https://raw.githubusercontent.com/{REPO_USER}/{REPO_NAME}/{REPO_BRANCH}/{file_path}"
+    """Get the raw URL for a file in the GitHub repository with cache busting"""
+    # Add cache-busting timestamp parameter to prevent caching
+    timestamp = int(time.time())
+    return f"https://raw.githubusercontent.com/{REPO_USER}/{REPO_NAME}/{REPO_BRANCH}/{file_path}?t={timestamp}"
 
 def get_remote_version():
-    """Get the version from the remote updater.py file"""
+    """Get the version from the remote version.txt file"""
     try:
         logger.info(f"Checking remote version from {REPO_USER}/{REPO_NAME}")
-        updater_url = get_raw_file_url("updater.py")
-        logger.info(f"Fetching remote updater.py from: {updater_url}")
+        version_url = get_raw_file_url("version.txt")
+        logger.info(f"Fetching version from: {version_url}")
         
         req = urllib.request.Request(
-            updater_url,
+            version_url,
             headers={
-                'User-Agent': 'EMR-Data-Mapper-Updater'
+                'User-Agent': 'EMR-Data-Mapper-Updater',
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Pragma': 'no-cache',
+                'Expires': '0'
             }
         )
         
         with urllib.request.urlopen(req, timeout=10) as response:
             logger.info(f"Got response from GitHub (status: {response.status})")
-            content = response.read().decode('utf-8')
-            logger.debug(f"Received content length: {len(content)} bytes")
+            content = response.read().decode('utf-8').strip()
             
-            # Find the CURRENT_VERSION line
-            for line in content.splitlines():
-                if 'CURRENT_VERSION' in line and '=' in line:
-                    # Extract the version string more carefully
-                    version_part = line.split('=')[1].strip()
-                    # Extract just the version number (remove comments and quotes)
-                    import re
-                    version_match = re.match(r'["\']([0-9.]+)["\']', version_part)
-                    if version_match:
-                        version_str = version_match.group(1)
-                        logger.info(f"Found remote version: {version_str}")
-                        return version_str
+            # Log the content
+            logger.info(f"Version file content: {content}")
             
-            logger.warning("Could not find CURRENT_VERSION in remote updater.py")
-            return None
+            # Simple validation check
+            import re
+            if re.match(r'^\d+\.\d+\.\d+$', content):
+                logger.info(f"Found remote version: {content}")
+                return content
+            else:
+                logger.warning(f"Invalid version format: {content}")
+                return None
+            
     except Exception as e:
         logger.error(f"Error checking remote version: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
 def check_for_updates():
