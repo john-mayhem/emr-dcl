@@ -38,8 +38,33 @@ if not os.path.exists(CORE_DIR):
 
 # Configuration - scripts to run in order
 SCRIPTS = [
-
+    {
+        "name": "EMR Data Collector",
+        "file": "emr_data_collector.py",
+        "description": "Collects patient data from the EMR system"
+    },
+    {
+        "name": "Google Sheets Collector",
+        "file": "google_sheets_collector.py",
+        "description": "Downloads data from Google Sheets"
+    },
+    {
+        "name": "Data Processor",
+        "file": "data_processor.py",
+        "description": "Processes collected data and cleans addresses"
+    },
+    {
+        "name": "Staff Comparator",
+        "file": "comparator.py",
+        "description": "Compares Need Staff with Active Cases and updates Google Sheets"
+    },
+    {
+        "name": "KML Generator",
+        "file": "kml_generator.py",
+        "description": "Generates KML files for visualization in Google Maps"
+    }
 ]
+
 
 def print_header():
     """Print a colorful header for the launcher"""
