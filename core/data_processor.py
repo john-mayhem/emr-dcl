@@ -6,6 +6,7 @@ import pandas as pd
 import glob
 import re
 import shutil
+import pickle
 from datetime import datetime
 import importlib.util
 
@@ -466,6 +467,272 @@ def process_excel_file(file_path):
         logger.error(traceback.format_exc())  # Add detailed traceback
         return None
 
+
+def process_full_active_cases_report():
+    """Process the Full Active Cases Report to extract patient names and therapist information"""
+    try:
+        input_file = os.path.join(DATA_DIR, "Full_ActiveCasesReport.xlsx")
+        output_file = os.path.join(PROCESSED_DIR, "PatientTherapistMap.csv")
+        
+        logger.info(f"Processing Full Active Cases Report for patient-therapist mapping")
+        
+        if not os.path.exists(input_file):
+            logger.error(f"Full Active Cases Report not found: {input_file}")
+            return False
+        
+        # Read the Excel file
+        try:
+            df = pd.read_excel(input_file)
+        except Exception as e:
+            logger.error(f"Error reading Excel file: {e}")
+            # Try alternative approach with explicit sheet name
+            try:
+                logger.info("Trying to read Excel with explicit sheet name...")
+                xls = pd.ExcelFile(input_file)
+                sheet_name = xls.sheet_names[0]  # Get the first sheet name
+                df = pd.read_excel(input_file, sheet_name=sheet_name)
+            except Exception as e2:
+                logger.error(f"Second attempt failed: {e2}")
+                return False
+        
+        # Check if the dataframe is empty
+        if df.empty:
+            logger.warning(f"Full Active Cases Report is empty")
+            return False
+        
+        # Log the column names to help with debugging
+        logger.info(f"Full report columns: {df.columns.tolist()}")
+        
+        # Try multiple approaches to find the right columns
+        # First try exact column names from the CSV structure
+        column_mapping_attempts = [
+            # First attempt: Exact matches from CSV
+            {
+                'Location': 'Office',
+                'Patient': 'Patient_Name',
+                'Therapist': 'Therapist',
+                'Discipline': 'Discipline',
+                'Case': 'Case_Id'
+            },
+            # Second attempt: Common variations
+            {
+                'Organization': 'Office',
+                'Patient Name': 'Patient_Name',
+                'Therapist Name': 'Therapist',
+                'Discipline': 'Discipline',
+                'Case ID': 'Case_Id'
+            },
+            # Third attempt: More variations
+            {
+                'Office': 'Office',
+                'Patient': 'Patient_Name',
+                'Name': 'Patient_Name',
+                'Therapist': 'Therapist',
+                'Provider': 'Therapist'
+            }
+        ]
+        
+        mapped_columns = {}
+        for attempt in column_mapping_attempts:
+            # For each standard name, try to find a matching column in the DataFrame
+            for standard_name, new_name in attempt.items():
+                if standard_name in df.columns and new_name not in mapped_columns.values():
+                    mapped_columns[standard_name] = new_name
+        
+        # Fall back to partial matches if needed
+        if not all(name in mapped_columns.values() for name in ['Patient_Name', 'Therapist']):
+            logger.warning("Couldn't find exact matches for essential columns, trying partial matches")
+            for col in df.columns:
+                col_lower = col.lower()
+                if 'patient' in col_lower and 'Patient_Name' not in mapped_columns.values():
+                    mapped_columns[col] = 'Patient_Name'
+                elif 'therapist' in col_lower and 'Therapist' not in mapped_columns.values():
+                    mapped_columns[col] = 'Therapist'
+                elif ('location' in col_lower or 'office' in col_lower) and 'Office' not in mapped_columns.values():
+                    mapped_columns[col] = 'Office'
+                elif 'discipline' in col_lower and 'Discipline' not in mapped_columns.values():
+                    mapped_columns[col] = 'Discipline'
+        
+        # Check if we have the essential columns
+        if not all(name in mapped_columns.values() for name in ['Patient_Name', 'Therapist']):
+            logger.error("Essential columns (Patient_Name, Therapist) not found")
+            logger.info(f"Available columns: {df.columns.tolist()}")
+            return False
+        
+        # Create a new DataFrame with only the columns we need
+        selected_df = df[list(mapped_columns.keys())].copy()
+        selected_df.columns = [mapped_columns[col] for col in list(mapped_columns.keys())]
+        
+        # Add a column for the therapist caseload (extract from therapist field)
+        if 'Therapist' in selected_df.columns:
+            # Extract caseload from therapist name using regex - handle different formats
+            # Try multiple regex patterns to catch different formats
+            caseload_patterns = [
+                r'\((\d+\.?\d*)\s*Active\s*Cases\)',  # (19.0 Active Cases)
+                r'\((\d+\.?\d*)\s*cases?\)',          # (19.0 cases)
+                r'(\d+\.?\d*)\s*Active\s*Cases',      # 19.0 Active Cases
+                r'(\d+\.?\d*)\s*cases?'               # 19.0 cases
+            ]
+            
+            for pattern in caseload_patterns:
+                selected_df['Therapist_Caseload'] = selected_df['Therapist'].astype(str).str.extract(pattern, expand=False)
+                if selected_df['Therapist_Caseload'].notna().any():
+                    logger.info(f"Extracted therapist caseload using pattern: {pattern}")
+                    break
+            
+            # Clean the therapist name to remove the caseload information
+            for pattern in [
+                r'\s*\(\d+\.?\d*\s*Active\s*Cases\)',
+                r'\s*\(\d+\.?\d*\s*cases?\)',
+                r'\s*\d+\.?\d*\s*Active\s*Cases',
+                r'\s*\d+\.?\d*\s*cases?'
+            ]:
+                selected_df['Therapist_Name'] = selected_df['Therapist'].astype(str).str.replace(pattern, '', regex=True).str.strip()
+            
+            logger.info(f"Extracted therapist caseload information")
+        
+        # Save the processed data
+        selected_df.to_csv(output_file, index=False)
+        logger.info(f"Successfully saved patient-therapist mapping to {output_file}")
+        
+        # Create a matching dictionary for easier lookup
+        try:
+            # Create a map of patient name to therapist
+            patient_therapist_map = {}
+            for _, row in selected_df.iterrows():
+                patient_name = row['Patient_Name']
+                therapist_name = row.get('Therapist_Name', row.get('Therapist', ''))
+                therapist_caseload = row.get('Therapist_Caseload', '')
+                
+                if pd.notna(patient_name) and pd.notna(therapist_name):
+                    # Strip any leading/trailing whitespace
+                    patient_name = str(patient_name).strip()
+                    therapist_name = str(therapist_name).strip()
+                    
+                    patient_therapist_map[patient_name] = {
+                        'therapist': therapist_name,
+                        'caseload': therapist_caseload
+                    }
+            
+            # Also create a therapist-to-caseload map
+            therapist_caseload_map = {}
+            for _, row in selected_df.iterrows():
+                therapist_name = row.get('Therapist_Name', row.get('Therapist', ''))
+                therapist_caseload = row.get('Therapist_Caseload', '')
+                
+                if pd.notna(therapist_name) and pd.notna(therapist_caseload):
+                    therapist_name = str(therapist_name).strip()
+                    therapist_caseload_map[therapist_name] = therapist_caseload
+            
+            # Save as pickle files for easier loading in other scripts
+            with open(os.path.join(PROCESSED_DIR, "patient_therapist_map.pickle"), 'wb') as f:
+                pickle.dump(patient_therapist_map, f)
+                
+            with open(os.path.join(PROCESSED_DIR, "therapist_caseload_map.pickle"), 'wb') as f:
+                pickle.dump(therapist_caseload_map, f)
+            
+            logger.info(f"Created patient-therapist mapping with {len(patient_therapist_map)} entries")
+            logger.info(f"Created therapist-caseload mapping with {len(therapist_caseload_map)} entries")
+        except Exception as e:
+            logger.error(f"Error creating patient-therapist map: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error processing Full Active Cases Report: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
+def enrich_patient_data_with_therapists():
+    """Add therapist information to processed patient files"""
+    try:
+        logger.info("Enriching patient data with therapist information")
+        
+        # Check if we have the patient-therapist map
+        map_file = os.path.join(PROCESSED_DIR, "patient_therapist_map.pickle")
+        if not os.path.exists(map_file):
+            logger.error("Patient-therapist mapping not found, cannot enrich patient data")
+            return False
+        
+        # Load the patient-therapist map
+        with open(map_file, 'rb') as f:
+            patient_therapist_map = pickle.load(f)
+        
+        logger.info(f"Loaded patient-therapist map with {len(patient_therapist_map)} entries")
+        
+        # Get all processed patient CSV files
+        processed_files = glob.glob(os.path.join(PROCESSED_DIR, "*_Processed.csv"))
+        
+        # Initialize counts
+        total_patients = 0
+        matched_patients = 0
+        
+        # Process each file
+        for file_path in processed_files:
+            file_name = os.path.basename(file_path)
+            logger.info(f"Enriching {file_name} with therapist information")
+            
+            try:
+                # Read the CSV file
+                df = pd.read_csv(file_path)
+                if df.empty:
+                    logger.warning(f"File {file_name} is empty, skipping")
+                    continue
+                
+                # Track whether we made any changes
+                made_changes = False
+                
+                # Add therapist and description columns if they don't exist
+                if 'Therapist' not in df.columns:
+                    df['Therapist'] = ""
+                if 'Therapist_Caseload' not in df.columns:
+                    df['Therapist_Caseload'] = ""
+                
+                # Update the description field (Patient ID to Name (Patient ID))
+                # First check if we have the Name and Patient_Id columns
+                if 'Name' in df.columns and 'Patient_Id' in df.columns:
+                    # Create enhanced description
+                    df['Enhanced_Description'] = df.apply(
+                        lambda row: f"{row['Name']} ({row['Patient_Id']})" if pd.notna(row['Name']) else str(row['Patient_Id']),
+                        axis=1
+                    )
+                    made_changes = True
+                    logger.info(f"Added enhanced descriptions for {len(df)} patients in {file_name}")
+                
+                # Add therapist information based on patient name match
+                total_patients += len(df)
+                if 'Name' in df.columns:
+                    for idx, row in df.iterrows():
+                        patient_name = row['Name']
+                        if patient_name in patient_therapist_map:
+                            df.at[idx, 'Therapist'] = patient_therapist_map[patient_name]['therapist']
+                            df.at[idx, 'Therapist_Caseload'] = patient_therapist_map[patient_name]['caseload']
+                            matched_patients += 1
+                            made_changes = True
+                
+                # If we made changes, save the file
+                if made_changes:
+                    df.to_csv(file_path, index=False)
+                    logger.info(f"Updated {file_name} with therapist information")
+                
+            except Exception as e:
+                logger.error(f"Error processing {file_name}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+        
+        logger.info(f"Enrichment complete: matched {matched_patients}/{total_patients} patients with therapists")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error enriching patient data: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+    
+    
 def main():
     """Main function to process all data files"""
     print(f"\n{Fore.CYAN}{Style.BRIGHT}{'='*80}")
@@ -489,8 +756,33 @@ def main():
         success_count += 1
         total_files += 1
     
-    # 3. Process Excel files
+    # 3. Process Full Active Cases Report specifically for therapist information
+    full_report_file = os.path.join(DATA_DIR, "Full_ActiveCasesReport.xlsx")
+    has_full_report = False
+    
+    if os.path.exists(full_report_file):
+        total_files += 1
+        print(f"\n{Fore.CYAN}{'─'*80}")
+        print(f"{Fore.YELLOW}[Special] Processing: {Fore.CYAN}Full Active Cases Report")
+        print(f"{Fore.CYAN}{'─'*80}{Style.RESET_ALL}")
+        
+        start_time = time.time()
+        if process_full_active_cases_report():
+            has_full_report = True
+            end_time = time.time()
+            duration = end_time - start_time
+            success_count += 1
+            print(f"{Fore.GREEN}✓ {Style.BRIGHT}Full Report processed in {duration:.2f} seconds ({success_count}/{total_files} done)")
+        else:
+            print(f"{Fore.RED}✗ {Style.BRIGHT}Failed to process Full Report ({success_count}/{total_files} done)")
+    
+    # 4. Process Excel files (office-specific reports)
     excel_files = glob.glob(os.path.join(DATA_DIR, "*.xlsx"))
+    
+    # Exclude the Full Active Cases Report from the regular processing
+    if os.path.exists(full_report_file) and full_report_file in excel_files:
+        excel_files.remove(full_report_file)
+    
     total_files += len(excel_files)
     
     # Create a list to store dataframes for potential combining later
@@ -513,8 +805,19 @@ def main():
         else:
             print(f"{Fore.RED}✗ {Style.BRIGHT}Failed to process file ({success_count}/{total_files} done)")
     
-    # Note: As per requirements, we're not combining Excel files
-    # Each processed file is saved separately with its own name
+    # 5. Enrich patient data with therapist information if we have the full report
+    if has_full_report:
+        print(f"\n{Fore.CYAN}{'─'*80}")
+        print(f"{Fore.YELLOW}[Final Step] Enriching patient data with therapist information")
+        print(f"{Fore.CYAN}{'─'*80}{Style.RESET_ALL}")
+        
+        start_time = time.time()
+        if enrich_patient_data_with_therapists():
+            end_time = time.time()
+            duration = end_time - start_time
+            print(f"{Fore.GREEN}✓ {Style.BRIGHT}Patient data enriched in {duration:.2f} seconds")
+        else:
+            print(f"{Fore.RED}✗ {Style.BRIGHT}Failed to enrich patient data with therapist information")
     
     # Print summary
     total_duration = time.time() - total_start_time
