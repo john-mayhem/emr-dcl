@@ -587,6 +587,171 @@ def process_report(driver, office, discipline, filter_type="With Cases"):
         logger.error(f"Error processing report for {office} - {discipline}: {e}")
         return False
 
+# Add this new function after the verify_and_rename_downloaded_file function
+def download_full_active_cases_report(driver):
+    """Download the full Active Cases Report without filtering by office"""
+    try:
+        logger.info("Downloading full Active Cases Report")
+        
+        # Load the active cases report page
+        driver.get("https://emr.appv2.hellonote.com/app/main/reports/activeCases")
+        logger.info("Opened Active Cases Report page")
+        time.sleep(DELAY_AFTER_PAGE_LOAD * 2)  # Double the delay for this page which might be larger
+        
+        # Clear any existing download for the full report
+        full_report_filename = "Full_ActiveCasesReport.xlsx"
+        existing_file = os.path.join(OUTPUT_DIR, full_report_filename)
+        if os.path.exists(existing_file):
+            try:
+                os.remove(existing_file)
+                logger.info(f"Removed existing file: {existing_file}")
+            except Exception as e:
+                logger.warning(f"Could not remove existing file: {e}")
+        
+        # Add a short delay to ensure UI is ready
+        time.sleep(DELAY_BEFORE_EXPORT * 2)  # Double the delay for this page
+        
+        # Before clicking export, check for and dismiss any dialogs
+        try:
+            # This can sometimes clear the browser's security popup or warnings
+            driver.execute_script("""
+            // Try to dismiss any active security dialogs
+            document.body.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+            document.body.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+            """)
+        except Exception:
+            pass
+        
+        # Try to click Export to Excel using multiple methods
+        export_clicked = False
+        
+        # Method 1: Try direct JavaScript approach
+        logger.info("Attempting to click Export button using direct JavaScript")
+        try:
+            result = driver.execute_script("""
+            const exportButtons = Array.from(document.querySelectorAll('button'))
+                .filter(btn => btn.textContent.trim().includes('Export to excel'));
+            
+            if (exportButtons.length > 0) {
+                console.log('Found Export button, clicking...');
+                exportButtons[0].click();
+                return "Button clicked via JavaScript";
+            }
+            
+            return "Export button not found via JavaScript";
+            """)
+            logger.info(f"JavaScript export click result: {result}")
+            if "clicked" in result:
+                export_clicked = True
+                time.sleep(DELAY_BETWEEN_UI_OPERATIONS * 2)
+        except Exception as e:
+            logger.warning(f"JavaScript export click failed: {e}")
+        
+        # Method 2: Try standard Selenium approach if JavaScript failed
+        if not export_clicked:
+            logger.info("Attempting to click Export button using Selenium")
+            try:
+                button = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Export to excel')]"))
+                )
+                logger.info("Found Export button, clicking...")
+                button.click()
+                export_clicked = True
+                time.sleep(DELAY_BETWEEN_UI_OPERATIONS * 2)
+            except Exception as e:
+                logger.warning(f"Selenium export click failed: {e}")
+        
+        # Method 3: Last resort, try clicking by coordinates if we found the button
+        if not export_clicked:
+            logger.info("Attempting to click Export button using action chain")
+            try:
+                button = driver.find_element(By.XPATH, "//button[contains(text(), 'Export to excel')]")
+                actions = webdriver.ActionChains(driver)
+                actions.move_to_element(button).click().perform()
+                export_clicked = True
+                time.sleep(DELAY_BETWEEN_UI_OPERATIONS * 2)
+            except Exception as e:
+                logger.error(f"Action chain export click failed: {e}")
+        
+        if not export_clicked:
+            logger.error("All attempts to click Export to excel button failed")
+            return False
+            
+        logger.info("Export to excel button clicked successfully")
+        
+        # Wait for the file to appear in the download directory
+        max_wait_time = 120  # Longer timeout for the full report which may be larger
+        start_time = time.time()
+        
+        logger.info(f"Waiting up to {max_wait_time} seconds for download to complete...")
+        
+        # Look for the downloaded file
+        while time.time() - start_time < max_wait_time:
+            # Log progress updates
+            elapsed = time.time() - start_time
+            if elapsed > 0 and elapsed % 10 == 0:  # Log every 10 seconds
+                logger.info(f"Still waiting for download... {int(elapsed)} seconds elapsed")
+            
+            excel_files = [f for f in os.listdir(OUTPUT_DIR) if f.endswith('.xlsx') or
+                          (f.endswith('.xlsx.crdownload') or f.endswith('.xlsx.tmp'))]
+            
+            # First check for complete downloads
+            complete_files = [f for f in excel_files if f.endswith('.xlsx')]
+            if complete_files:
+                # Sort by modification time, newest first
+                complete_files.sort(key=lambda x: os.path.getmtime(os.path.join(OUTPUT_DIR, x)), reverse=True)
+                most_recent_file = complete_files[0]
+                
+                # Get modification time to check if it's actually a new file
+                mod_time = os.path.getmtime(os.path.join(OUTPUT_DIR, most_recent_file))
+                if mod_time > start_time:  # Only consider files created after we clicked export
+                    logger.info(f"Found potential download: {most_recent_file}")
+                    
+                    # Handle file rename
+                    if "ActivePatientsReport" in most_recent_file or "ActiveCasesReport" in most_recent_file:
+                        old_path = os.path.join(OUTPUT_DIR, most_recent_file)
+                        new_path = os.path.join(OUTPUT_DIR, full_report_filename)
+                        
+                        # Make sure the file is complete and not being scanned
+                        try:
+                            # Attempt to open and read the file to ensure it's not locked
+                            with open(old_path, 'rb') as f:
+                                # Just read a small portion to check if file is accessible
+                                data = f.read(1024)
+                                
+                            # Check if target already exists and remove if needed
+                            if os.path.exists(new_path):
+                                os.remove(new_path)
+                            
+                            # Rename the file
+                            os.rename(old_path, new_path)
+                            logger.info(f"Renamed {most_recent_file} to {full_report_filename}")
+                            return True
+                        except (PermissionError, IOError) as e:
+                            # File might still be locked by virus scanner or download process
+                            logger.info(f"File not yet accessible, waiting: {e}")
+                            time.sleep(1)
+                            continue
+            
+            # Check if downloads are in progress
+            in_progress_files = [f for f in excel_files if f.endswith('.xlsx.crdownload') or f.endswith('.xlsx.tmp')]
+            if in_progress_files:
+                logger.info(f"Download in progress: {in_progress_files}")
+                time.sleep(1)
+                continue
+                
+            # If no files found yet, brief wait
+            time.sleep(0.5)
+        
+        logger.error("Timed out waiting for downloaded full report file")
+        return False
+    except Exception as e:
+        logger.error(f"Error downloading full Active Cases Report: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return False
+
+# Now modify the main function to include this new step at the end
 def main():
     """Main function to run the data collection process"""
     print(f"\n{Fore.CYAN}{Style.BRIGHT}{'='*80}")
@@ -675,19 +840,39 @@ def main():
                 
                 time.sleep(DELAY_BETWEEN_REPORTS)
         
+        # Now download the full Active Cases Report as the final step
+        print(f"\n{Fore.CYAN}{'─'*80}")
+        print(f"{Fore.YELLOW}[Final Step] Downloading Full Active Cases Report")
+        print(f"{Fore.CYAN}{'─'*80}{Style.RESET_ALL}")
+        
+        # Add a longer delay before the full report to ensure the browser is fully ready
+        time.sleep(DELAY_BETWEEN_REPORTS * 2)
+        
+        full_report_start_time = time.time()
+        full_report_success = download_full_active_cases_report(driver)
+        full_report_end_time = time.time()
+        
+        if full_report_success:
+            full_report_duration = full_report_end_time - full_report_start_time
+            print(f"{Fore.GREEN}✓ {Style.BRIGHT}Full Active Cases Report completed in {full_report_duration:.2f} seconds")
+        else:
+            print(f"{Fore.RED}✗ {Style.BRIGHT}Failed to download Full Active Cases Report")
+        
         total_duration = time.time() - total_start_time
         minutes = int(total_duration // 60)
         seconds = int(total_duration % 60)
         
         print(f"\n{Fore.CYAN}{Style.BRIGHT}{'='*80}")
-        print(f"{Fore.YELLOW}{Style.BRIGHT}{f'DATA COLLECTION COMPLETED: {completed}/{total_reports} REPORTS':^80}")
+        print(f"{Fore.YELLOW}{Style.BRIGHT}{f'DATA COLLECTION COMPLETED: {completed}/{total_reports} REPORTS + FULL REPORT':^80}")
         print(f"{Fore.GREEN}{Style.BRIGHT}{f'Total time: {minutes} minutes {seconds} seconds':^80}")
         print(f"{Fore.CYAN}{Style.BRIGHT}{'='*80}{Style.RESET_ALL}\n")
         
-        logger.info(f"Data collection completed: {completed}/{total_reports} reports processed")
+        logger.info(f"Data collection completed: {completed}/{total_reports} reports processed + Full Active Cases Report")
         
     except Exception as e:
         logger.error(f"An error occurred during data collection: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
     finally:
         if driver:
             driver.quit()
