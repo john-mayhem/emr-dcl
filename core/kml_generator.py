@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 import colorsys
 import re
 import glob
+import pickle
 from datetime import datetime
 import importlib.util
 
@@ -146,6 +147,171 @@ def extract_zipcodes_from_area(area):
     zipcodes = [zip.strip() for zip in area.split(',') if zip.strip().isdigit() and len(zip.strip()) == 5]
     return zipcodes
 
+# Fix create_patient_pins_kml function to remove redundant therapist info from description
+def create_patient_pins_kml(patient_dfs):
+    """Create a KML file with patient pins colored by organization"""
+    logger.info(f"Creating patient pins KML")
+    
+    # Create new KML structure
+    kml = ET.Element('kml', {'xmlns': 'http://www.opengis.net/kml/2.2'})
+    doc = ET.SubElement(kml, 'Document')
+    
+    # Add name with current date
+    name_elem = ET.SubElement(doc, 'name')
+    name_elem.text = f"Active_Cases_{datetime.now().strftime('%m/%d/%Y')}"
+    
+    # Define colors for different organizations
+    org_styles = {
+        "Rehab_on_Wheels": "icon-1502-558B2F",  # Green
+        "Shining_Star": "icon-1502-FFEA00",  # Yellow
+        "Four_Seasons": "icon-1502-C2185B",  # Pink
+        "Girling_Health": "icon-1502-3949AB",  # Blue
+        "Personal_Touch": "icon-1502-880E4F",  # Purple
+        "Americare": "icon-1502-E65100"  # Orange
+    }
+    
+    # Define colors
+    colors = {
+        "icon-1502-558B2F": "ff2f8b55",  # Green
+        "icon-1502-FFEA00": "ff00eaff",  # Yellow
+        "icon-1502-C2185B": "ff5b18c2",  # Pink
+        "icon-1502-3949AB": "ffab4939",  # Blue
+        "icon-1502-880E4F": "ff4f0e88",  # Purple
+        "icon-1502-E65100": "ff0051e6"   # Orange
+    }
+    
+    # Create all the styles
+    for style_id, color_code in colors.items():
+        style = ET.SubElement(doc, 'Style', {'id': style_id})
+        icon_style = ET.SubElement(style, 'IconStyle')
+        color = ET.SubElement(icon_style, 'color')
+        color.text = color_code
+        scale = ET.SubElement(icon_style, 'scale')
+        scale.text = '1'
+        icon = ET.SubElement(icon_style, 'Icon')
+        href = ET.SubElement(icon, 'href')
+        href.text = 'https://www.gstatic.com/mapspro/images/stock/503-wht-blank_maps.png'
+        hotspot = ET.SubElement(icon_style, 'hotSpot')
+        hotspot.set('x', '32')
+        hotspot.set('xunits', 'pixels')
+        hotspot.set('y', '64')
+        hotspot.set('yunits', 'insetPixels')
+    
+    # Track which patient IDs we've already processed
+    processed_patients = {}
+    
+    # First pass - collect all patients and their disciplines
+    for df_name, df in patient_dfs:
+        # Extract organization and discipline from filename
+        match = re.match(r'(.+?)_(OT|PT)_Processed\.csv', df_name)
+        if match:
+            org = match.group(1)
+            disc = match.group(2)
+            
+            # Skip if no data for this office/discipline
+            if df.empty:
+                continue
+            
+            # Process each patient to collect disciplines
+            for _, row in df.iterrows():
+                patient_id = str(row['Patient_Id'])
+                
+                if patient_id not in processed_patients:
+                    processed_patients[patient_id] = {
+                        'row': row,
+                        'disciplines': set([disc]),
+                        'org': org
+                    }
+                else:
+                    # If patient already exists, add this discipline
+                    processed_patients[patient_id]['disciplines'].add(disc)
+    
+    # Counter for pins
+    pin_count = 0
+    
+    # Second pass - create placemarks with combined disciplines where needed
+    for patient_id, patient_data in processed_patients.items():
+        row = patient_data['row']
+        org = patient_data['org']
+        
+        if pd.notna(row['Zip']) and pd.notna(row['Address']):
+            # Create a placemark
+            placemark = ET.SubElement(doc, 'Placemark')
+            
+            # Add name - Use Enhanced_Description if available, otherwise Patient ID
+            name_elem = ET.SubElement(placemark, 'name')
+            if 'Enhanced_Description' in row and pd.notna(row['Enhanced_Description']):
+                name_elem.text = row['Enhanced_Description']
+            else:
+                name_elem.text = patient_id
+            
+            # Format the full address string for Google Maps to geocode
+            full_address = f"{row['Address']}, {row['City']}, {row['State']}, {row['Zip']}"
+            
+            # Add address tag
+            address_elem = ET.SubElement(placemark, 'address')
+            address_elem.text = full_address
+            
+            # Add simple description - just the Patient ID (don't duplicate therapist info here)
+            description_elem = ET.SubElement(placemark, 'description')
+            description_elem.text = patient_id
+            
+            # Add style reference based on organization
+            org_key = org.replace(" ", "_").replace(".", "").replace(",", "")
+            style_id = org_styles.get(org_key, org_styles["Americare"])  # Default if not found
+            style_url = ET.SubElement(placemark, 'styleUrl')
+            style_url.text = f'#{style_id}'
+            
+            # Add ExtendedData with the required fields in the correct order
+            extended_data = ET.SubElement(placemark, 'ExtendedData')
+            
+            # Name field
+            data_elem = ET.SubElement(extended_data, 'Data', {'name': 'Name'})
+            value_elem = ET.SubElement(data_elem, 'value')
+            value_elem.text = row['Name']
+            
+            # address field (lowercase as in your example)
+            data_elem = ET.SubElement(extended_data, 'Data', {'name': 'address'})
+            value_elem = ET.SubElement(data_elem, 'value')
+            value_elem.text = full_address
+            
+            # Discipline field - Combine disciplines if multiple
+            data_elem = ET.SubElement(extended_data, 'Data', {'name': 'Discipline'})
+            value_elem = ET.SubElement(data_elem, 'value')
+            
+            disciplines = patient_data['disciplines']
+            if 'PT' in disciplines and 'OT' in disciplines:
+                value_elem.text = "PT and OT"
+            else:
+                value_elem.text = next(iter(disciplines))  # Just use the single discipline
+            
+            # Location field
+            data_elem = ET.SubElement(extended_data, 'Data', {'name': 'Location'})
+            value_elem = ET.SubElement(data_elem, 'value')
+            value_elem.text = org.replace("_", " ")
+            
+            # Add Therapist field if available
+            if 'Therapist' in row and pd.notna(row['Therapist']):
+                data_elem = ET.SubElement(extended_data, 'Data', {'name': 'Therapist'})
+                value_elem = ET.SubElement(data_elem, 'value')
+                # Use either the therapist with caseload already included, or add the caseload if separate
+                if ' Active Cases' in row['Therapist']:
+                    # If caseload is already in the therapist name, use as is
+                    value_elem.text = row['Therapist']
+                elif 'Therapist_Caseload' in row and pd.notna(row['Therapist_Caseload']):
+                    # If caseload is separate, add it
+                    value_elem.text = f"{row['Therapist']} ({row['Therapist_Caseload']} Active Cases)"
+                else:
+                    # No caseload available
+                    value_elem.text = row['Therapist']
+            
+            pin_count += 1
+    
+    logger.info(f"Added {pin_count} patient pins to the KML (after combining duplicate patients)")
+    
+    return kml if pin_count > 0 else None
+
+# Fix create_therapist_coverage_kml function to properly include caseload information
 def create_therapist_coverage_kml(discipline, therapist_df, zip_kml_file, color):
     """Create KML file for all therapists of a specific discipline with therapist listings"""
     logger.info(f"Creating {discipline} therapist coverage KML")
@@ -158,6 +324,28 @@ def create_therapist_coverage_kml(discipline, therapist_df, zip_kml_file, color)
     # Create mapping of ZIP codes to therapists
     zipcode_therapists = {}
     
+    # Try to load therapist caseload information if available
+    therapist_caseloads = {}
+    try:
+        # Check if the patient-therapist map exists
+        map_file = os.path.join(PROCESSED_DIR, "patient_therapist_map.pickle")
+        if os.path.exists(map_file):
+            with open(map_file, 'rb') as f:
+                patient_therapist_map = pickle.load(f)
+            
+            # Extract unique therapists and their caseloads
+            for patient_data in patient_therapist_map.values():
+                therapist = patient_data.get('therapist', '')
+                caseload = patient_data.get('caseload', '')
+                if therapist and caseload:
+                    therapist_caseloads[therapist.strip()] = caseload
+            
+            logger.info(f"Loaded caseload information for {len(therapist_caseloads)} therapists")
+        else:
+            logger.warning("Patient-therapist mapping not found, therapist caseloads not available")
+    except Exception as e:
+        logger.error(f"Error loading therapist caseloads: {e}")
+    
     # Filter therapists by discipline (PT* or OT*)
     pattern = f"^{discipline}" if discipline in ["PT", "OT"] else discipline
     
@@ -168,7 +356,7 @@ def create_therapist_coverage_kml(discipline, therapist_df, zip_kml_file, color)
         # Skip therapists of other disciplines
         if not re.match(pattern, therapist_discipline):
             continue
-            
+        
         # Check if "Area" field exists and has zipcode information
         if isinstance(row.get('ZIP'), str) and row['ZIP'] != 'Anywhere':
             zipcodes = extract_zipcodes_from_area(row['ZIP'])
@@ -178,7 +366,15 @@ def create_therapist_coverage_kml(discipline, therapist_df, zip_kml_file, color)
                     zipcode_therapists[zipcode] = []
                 
                 # Add therapist information
-                therapist_info = f"{row['Discipline']} {row['Name']}"
+                therapist_name = row['Name'].strip()  # Make sure to strip whitespace
+                
+                # Start with basic therapist info
+                therapist_info = f"{discipline} {therapist_name}"
+                
+                # Try to add caseload if available (for all therapists in the area coverage)
+                if therapist_name in therapist_caseloads:
+                    therapist_info += f" ({therapist_caseloads[therapist_name]} Active Cases)"
+                
                 # Add language if available
                 if 'Language' in row and pd.notna(row['Language']):
                     therapist_info += f" ({row['Language']})"
@@ -272,151 +468,6 @@ def create_therapist_coverage_kml(discipline, therapist_df, zip_kml_file, color)
     logger.info(f"Added {placemark_count} placemarks to the {discipline} coverage KML")
     
     return kml if placemark_count > 0 else None
-
-def create_patient_pins_kml(patient_dfs):
-    """Create a KML file with patient pins colored by organization"""
-    logger.info(f"Creating patient pins KML")
-    
-    # Create new KML structure
-    kml = ET.Element('kml', {'xmlns': 'http://www.opengis.net/kml/2.2'})
-    doc = ET.SubElement(kml, 'Document')
-    
-    # Add name with current date
-    name_elem = ET.SubElement(doc, 'name')
-    name_elem.text = f"Active_Cases_{datetime.now().strftime('%m/%d/%Y')}"
-    
-    # Define colors for different organizations
-    org_styles = {
-        "Rehab_on_Wheels": "icon-1502-558B2F",  # Green
-        "Shining_Star": "icon-1502-FFEA00",  # Yellow
-        "Four_Seasons": "icon-1502-C2185B",  # Pink
-        "Girling_Health": "icon-1502-3949AB",  # Blue
-        "Personal_Touch": "icon-1502-880E4F",  # Purple
-        "Americare": "icon-1502-E65100"  # Orange
-    }
-    
-    # Define colors
-    colors = {
-        "icon-1502-558B2F": "ff2f8b55",  # Green
-        "icon-1502-FFEA00": "ff00eaff",  # Yellow
-        "icon-1502-C2185B": "ff5b18c2",  # Pink
-        "icon-1502-3949AB": "ffab4939",  # Blue
-        "icon-1502-880E4F": "ff4f0e88",  # Purple
-        "icon-1502-E65100": "ff0051e6"   # Orange
-    }
-    
-    # Create all the styles
-    for style_id, color_code in colors.items():
-        style = ET.SubElement(doc, 'Style', {'id': style_id})
-        icon_style = ET.SubElement(style, 'IconStyle')
-        color = ET.SubElement(icon_style, 'color')
-        color.text = color_code
-        scale = ET.SubElement(icon_style, 'scale')
-        scale.text = '1'
-        icon = ET.SubElement(icon_style, 'Icon')
-        href = ET.SubElement(icon, 'href')
-        href.text = 'https://www.gstatic.com/mapspro/images/stock/503-wht-blank_maps.png'
-        hotspot = ET.SubElement(icon_style, 'hotSpot')
-        hotspot.set('x', '32')
-        hotspot.set('xunits', 'pixels')
-        hotspot.set('y', '64')
-        hotspot.set('yunits', 'insetPixels')
-    
-    # Track which patient IDs we've already processed
-    processed_patients = {}
-    
-    # First pass - collect all patients and their disciplines
-    for df_name, df in patient_dfs:
-        # Extract organization and discipline from filename
-        match = re.match(r'(.+?)_(OT|PT)_Processed\.csv', df_name)
-        if match:
-            org = match.group(1)
-            disc = match.group(2)
-            
-            # Skip if no data for this office/discipline
-            if df.empty:
-                continue
-            
-            # Process each patient to collect disciplines
-            for _, row in df.iterrows():
-                patient_id = str(row['Patient_Id'])
-                
-                if patient_id not in processed_patients:
-                    processed_patients[patient_id] = {
-                        'row': row,
-                        'disciplines': set([disc]),
-                        'org': org
-                    }
-                else:
-                    # If patient already exists, add this discipline
-                    processed_patients[patient_id]['disciplines'].add(disc)
-    
-    # Counter for pins
-    pin_count = 0
-    
-    # Second pass - create placemarks with combined disciplines where needed
-    for patient_id, patient_data in processed_patients.items():
-        row = patient_data['row']
-        org = patient_data['org']
-        
-        if pd.notna(row['Zip']) and pd.notna(row['Address']):
-            # Create a placemark
-            placemark = ET.SubElement(doc, 'Placemark')
-            
-            # Add name - Patient ID instead of patient name
-            name_elem = ET.SubElement(placemark, 'name')
-            name_elem.text = patient_id
-            
-            # Format the full address string for Google Maps to geocode
-            full_address = f"{row['Address']}, {row['City']}, {row['State']}, {row['Zip']}"
-            
-            # Add address tag
-            address_elem = ET.SubElement(placemark, 'address')
-            address_elem.text = full_address
-            
-            # Add simple description - just the Patient ID
-            description_elem = ET.SubElement(placemark, 'description')
-            description_elem.text = patient_id
-            
-            # Add style reference based on organization
-            org_key = org.replace(" ", "_").replace(".", "").replace(",", "")
-            style_id = org_styles.get(org_key, org_styles["Americare"])  # Default if not found
-            style_url = ET.SubElement(placemark, 'styleUrl')
-            style_url.text = f'#{style_id}'
-            
-            # Add ExtendedData with the required fields in the correct order
-            extended_data = ET.SubElement(placemark, 'ExtendedData')
-            
-            # Name field
-            data_elem = ET.SubElement(extended_data, 'Data', {'name': 'Name'})
-            value_elem = ET.SubElement(data_elem, 'value')
-            value_elem.text = row['Name']
-            
-            # address field (lowercase as in your example)
-            data_elem = ET.SubElement(extended_data, 'Data', {'name': 'address'})
-            value_elem = ET.SubElement(data_elem, 'value')
-            value_elem.text = full_address
-            
-            # Discipline field - Combine disciplines if multiple
-            data_elem = ET.SubElement(extended_data, 'Data', {'name': 'Discipline'})
-            value_elem = ET.SubElement(data_elem, 'value')
-            
-            disciplines = patient_data['disciplines']
-            if 'PT' in disciplines and 'OT' in disciplines:
-                value_elem.text = "PT and OT"
-            else:
-                value_elem.text = next(iter(disciplines))  # Just use the single discipline
-            
-            # Location field
-            data_elem = ET.SubElement(extended_data, 'Data', {'name': 'Location'})
-            value_elem = ET.SubElement(data_elem, 'value')
-            value_elem.text = org.replace("_", " ")
-            
-            pin_count += 1
-    
-    logger.info(f"Added {pin_count} patient pins to the KML (after combining duplicate patients)")
-    
-    return kml if pin_count > 0 else None
 
 def create_need_staff_pins_kml(need_staff_df):
     """Create a KML file with need staff pins"""
